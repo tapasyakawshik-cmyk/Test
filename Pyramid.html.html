@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interactive 3D Visualizer: Pyramid on Cuboid</title>
+  <style>
+    :root { --bg:#0b1020; --panel:rgba(15,23,42,.92); --text:#e5e7eb; --muted:#94a3b8; --accent:#38bdf8; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; height:100%; overflow:hidden; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--text); }
+    canvas { display:block; width:100vw; height:100vh; cursor:grab; touch-action:none; }
+    canvas:active { cursor:grabbing; }
+    .panel { position:fixed; left:16px; top:16px; width:320px; max-width:calc(100vw - 32px); background:var(--panel); border:1px solid rgba(148,163,184,.25); border-radius:16px; padding:16px; box-shadow:0 22px 70px rgba(0,0,0,.45); backdrop-filter:blur(8px); }
+    h1 { font-size:18px; margin:0 0 6px; }
+    p { font-size:13px; line-height:1.4; color:var(--muted); margin:0 0 14px; }
+    .row { display:grid; grid-template-columns:1fr 56px; gap:10px; align-items:center; margin-top:10px; }
+    label { font-size:13px; }
+    .val { text-align:right; color:var(--accent); font-variant-numeric:tabular-nums; font-size:13px; }
+    input[type=range] { width:100%; accent-color:var(--accent); }
+    .buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:14px; }
+    button { border:1px solid rgba(148,163,184,.3); background:rgba(30,41,59,.8); color:var(--text); padding:9px 10px; border-radius:10px; cursor:pointer; }
+    button:hover { border-color:var(--accent); }
+    .hint { position:fixed; right:16px; bottom:16px; max-width:calc(100vw - 32px); padding:10px 12px; border-radius:12px; color:var(--muted); background:rgba(15,23,42,.78); border:1px solid rgba(148,163,184,.22); font-size:12px; }
+    @media (max-width: 700px) { .panel { width:auto; right:16px; } .hint { display:none; } }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <section class="panel">
+    <h1>Pyramid on Cuboid</h1>
+    <p>Self-contained Canvas 3D. Drag to rotate, mouse wheel/pinch to zoom. Change the dimensions below.</p>
+
+    <div class="row"><label for="cw">Cuboid width</label><span id="cwv" class="val"></span></div>
+    <input id="cw" type="range" min="1" max="8" step="0.1" value="4">
+    <div class="row"><label for="cd">Cuboid depth</label><span id="cdv" class="val"></span></div>
+    <input id="cd" type="range" min="1" max="8" step="0.1" value="3">
+    <div class="row"><label for="ch">Cuboid height</label><span id="chv" class="val"></span></div>
+    <input id="ch" type="range" min="0.5" max="6" step="0.1" value="2">
+    <div class="row"><label for="ph">Pyramid height</label><span id="phv" class="val"></span></div>
+    <input id="ph" type="range" min="0.3" max="6" step="0.1" value="2.2">
+    <div class="row"><label for="ps">Pyramid base scale</label><span id="psv" class="val"></span></div>
+    <input id="ps" type="range" min="0.2" max="1.4" step="0.05" value="1">
+
+    <div class="buttons">
+      <button id="reset">Reset view</button>
+      <button id="wire">Wireframe: off</button>
+    </div>
+  </section>
+  <div class="hint">No external libraries. Works offline in any modern browser.</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const $ = id => document.getElementById(id);
+  const inputs = { cw:$('cw'), cd:$('cd'), ch:$('ch'), ph:$('ph'), ps:$('ps') };
+  let W=0,H=0,dpr=1;
+  let rotX = -0.45, rotY = 0.72, zoom = 96;
+  let dragging = false, lastX=0, lastY=0, wireframe = false;
+  const faceStroke = 'rgba(229,231,235,.72)';
+
+  function resize(){
+    dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W*dpr); canvas.height = Math.round(H*dpr);
+    canvas.style.width = W+'px'; canvas.style.height = H+'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    draw();
+  }
+
+  function dims(){
+    return Object.fromEntries(Object.entries(inputs).map(([k,i])=>[k,parseFloat(i.value)]));
+  }
+
+  function updateLabels(){
+    $('cwv').textContent = (+inputs.cw.value).toFixed(1);
+    $('cdv').textContent = (+inputs.cd.value).toFixed(1);
+    $('chv').textContent = (+inputs.ch.value).toFixed(1);
+    $('phv').textContent = (+inputs.ph.value).toFixed(1);
+    $('psv').textContent = (+inputs.ps.value).toFixed(2);
+  }
+
+  function rotate(p){
+    let [x,y,z] = p;
+    const cy=Math.cos(rotY), sy=Math.sin(rotY);
+    const x1 = x*cy + z*sy, z1 = -x*sy + z*cy;
+    const cx=Math.cos(rotX), sx=Math.sin(rotX);
+    const y2 = y*cx - z1*sx, z2 = y*sx + z1*cx;
+    return [x1,y2,z2];
+  }
+
+  function project(p){
+    const [x,y,z] = rotate(p);
+    const perspective = 650 / (650 + z*zoom/4);
+    return { x: W/2 + x*zoom*perspective, y: H/2 + 95 - y*zoom*perspective, z };
+  }
+
+  function shade(hex, factor){
+    const n = parseInt(hex.slice(1),16);
+    let r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+    r=Math.max(0,Math.min(255,Math.round(r*factor)));
+    g=Math.max(0,Math.min(255,Math.round(g*factor)));
+    b=Math.max(0,Math.min(255,Math.round(b*factor)));
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function polygon(face){
+    const pts = face.verts.map(project);
+    return { ...face, pts, avgZ: pts.reduce((s,p)=>s+p.z,0)/pts.length };
+  }
+
+  function drawPoly(f){
+    ctx.beginPath();
+    ctx.moveTo(f.pts[0].x, f.pts[0].y);
+    for(let i=1;i<f.pts.length;i++) ctx.lineTo(f.pts[i].x, f.pts[i].y);
+    ctx.closePath();
+    if(!wireframe){ ctx.fillStyle = f.color; ctx.fill(); }
+    ctx.strokeStyle = faceStroke; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+
+  function drawAxes(){
+    const origin = project([0,0,0]);
+    const axes = [ [[2.8,0,0],'X'], [[0,2.8,0],'Y'], [[0,0,2.8],'Z'] ];
+    ctx.font = '12px system-ui'; ctx.lineWidth = 1;
+    for(const [end,label] of axes){
+      const p = project(end);
+      ctx.beginPath(); ctx.moveTo(origin.x,origin.y); ctx.lineTo(p.x,p.y); ctx.strokeStyle='rgba(148,163,184,.55)'; ctx.stroke();
+      ctx.fillStyle='rgba(203,213,225,.85)'; ctx.fillText(label,p.x+4,p.y+4);
+    }
+  }
+
+  function drawGrid(){
+    ctx.lineWidth = 1; ctx.strokeStyle='rgba(51,65,85,.42)';
+    for(let i=-6;i<=6;i++){
+      const a=project([-6,0,i]), b=project([6,0,i]);
+      const c=project([i,0,-6]), d=project([i,0,6]);
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(c.x,c.y); ctx.lineTo(d.x,d.y); ctx.stroke();
+    }
+  }
+
+  function buildFaces(){
+    const {cw,cd,ch,ph,ps} = dims();
+    const hw=cw/2, hd=cd/2;
+    const b0=[-hw,0,-hd], b1=[hw,0,-hd], b2=[hw,0,hd], b3=[-hw,0,hd];
+    const t0=[-hw,ch,-hd], t1=[hw,ch,-hd], t2=[hw,ch,hd], t3=[-hw,ch,hd];
+    const phw=hw*ps, phd=hd*ps;
+    const p0=[-phw,ch,-phd], p1=[phw,ch,-phd], p2=[phw,ch,phd], p3=[-phw,ch,phd];
+    const apex=[0,ch+ph,0];
+    return [
+      {verts:[b0,b1,b2,b3], color:shade('#38bdf8',.45)},
+      {verts:[b0,b1,t1,t0], color:shade('#38bdf8',.72)},
+      {verts:[b1,b2,t2,t1], color:shade('#38bdf8',.92)},
+      {verts:[b2,b3,t3,t2], color:shade('#38bdf8',.62)},
+      {verts:[b3,b0,t0,t3], color:shade('#38bdf8',.82)},
+      {verts:[t0,t1,t2,t3], color:shade('#38bdf8',1.08)},
+      {verts:[p0,p1,p2,p3], color:shade('#f59e0b',.72)},
+      {verts:[p0,apex,p1], color:shade('#f59e0b',.95)},
+      {verts:[p1,apex,p2], color:shade('#f59e0b',1.08)},
+      {verts:[p2,apex,p3], color:shade('#f59e0b',.82)},
+      {verts:[p3,apex,p0], color:shade('#f59e0b',.7)}
+    ];
+  }
+
+  function draw(){
+    updateLabels();
+    ctx.clearRect(0,0,W,H);
+    const grad = ctx.createLinearGradient(0,0,0,H);
+    grad.addColorStop(0,'#0b1020'); grad.addColorStop(1,'#111827');
+    ctx.fillStyle = grad; ctx.fillRect(0,0,W,H);
+    drawGrid(); drawAxes();
+    buildFaces().map(polygon).sort((a,b)=>a.avgZ-b.avgZ).forEach(drawPoly);
+  }
+
+  Object.values(inputs).forEach(i => i.addEventListener('input', draw));
+  $('reset').addEventListener('click',()=>{ rotX=-0.45; rotY=0.72; zoom=96; draw(); });
+  $('wire').addEventListener('click',()=>{ wireframe=!wireframe; $('wire').textContent='Wireframe: '+(wireframe?'on':'off'); draw(); });
+
+  canvas.addEventListener('pointerdown',e=>{ dragging=true; lastX=e.clientX; lastY=e.clientY; canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener('pointermove',e=>{ if(!dragging) return; const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; rotY += dx*0.01; rotX += dy*0.01; rotX=Math.max(-1.35,Math.min(1.1,rotX)); draw(); });
+  canvas.addEventListener('pointerup',()=> dragging=false);
+  canvas.addEventListener('pointercancel',()=> dragging=false);
+  canvas.addEventListener('wheel',e=>{ e.preventDefault(); zoom *= Math.exp(-e.deltaY*0.001); zoom=Math.max(45,Math.min(190,zoom)); draw(); }, {passive:false});
+  window.addEventListener('resize', resize);
+  resize();
+})();
+</script>
+</body>
+</html>
